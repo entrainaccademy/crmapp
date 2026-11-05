@@ -14,6 +14,15 @@ const CALL_TYPES = Object.freeze({
   INBOUND: 'Inbound',
 });
 
+const RECORDING_STATUSES = Object.freeze({
+  PENDING: 'Pending',
+  FOUND: 'Found',
+  UPLOADING: 'Uploading',
+  UPLOADED: 'Uploaded',
+  UNAVAILABLE: 'Unavailable',
+  FAILED: 'Failed',
+});
+
 const callLogSchema = new mongoose.Schema(
   {
     leadId: {
@@ -81,6 +90,47 @@ const callLogSchema = new mongoose.Schema(
       default: false,
       index: true,
     },
+    recordingType: {
+      type: String,
+      enum: ['device_attachment', 'voice_note', 'none'],
+      default: 'none',
+    },
+    recordingStatus: {
+      type: String,
+      enum: {
+        values: Object.values(RECORDING_STATUSES),
+        message: '{VALUE} is not a valid recording status',
+      },
+      default: RECORDING_STATUSES.UNAVAILABLE,
+      index: true,
+    },
+    recordingOriginalFilename: {
+      type: String,
+      trim: true,
+      default: null,
+    },
+    recordingFileSize: {
+      type: Number,
+      default: 0,
+    },
+    recordingFileHash: {
+      type: String,
+      trim: true,
+      default: null,
+      index: true,
+    },
+    recordingUploadedAt: {
+      type: Date,
+      default: null,
+    },
+    callStartedAt: {
+      type: Date,
+      default: null,
+    },
+    callEndedAt: {
+      type: Date,
+      default: null,
+    },
   },
   {
     timestamps: true,
@@ -98,5 +148,6 @@ module.exports = {
   CallLog,
   CALL_DISPOSITIONS,
   CALL_TYPES,
+  RECORDING_STATUSES,
 };
 

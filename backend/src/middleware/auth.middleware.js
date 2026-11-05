@@ -3,19 +3,18 @@ const { User } = require('../models/user.model');
 
 const authenticateToken = async (req, res, next) => {
   try {
+    let token = null;
     const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({
-        success: false,
-        message: 'Access denied. No authentication token provided.',
-      });
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.split(' ')[1];
+    } else if (req.query && req.query.token) {
+      token = req.query.token;
     }
 
-    const token = authHeader.split(' ')[1];
     if (!token) {
       return res.status(401).json({
         success: false,
-        message: 'Access denied. Malformed authorization token.',
+        message: 'Access denied. No authentication token provided.',
       });
     }
 

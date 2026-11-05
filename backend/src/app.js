@@ -5,6 +5,7 @@ const healthRoutes = require('./routes/health.routes');
 const authRoutes = require('./routes/auth.routes');
 const leadRoutes = require('./routes/lead.routes');
 const callLogRoutes = require('./routes/callLog.routes');
+const salesMemberRoutes = require('./routes/salesMember.routes');
 
 const app = express();
 
@@ -34,6 +35,7 @@ app.use('/api/health', healthRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/leads', leadRoutes);
 app.use('/api/calls', callLogRoutes);
+app.use('/api/sales-members', salesMemberRoutes);
 
 // Root Route
 app.get('/', (req, res) => {

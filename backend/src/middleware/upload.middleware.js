@@ -20,7 +20,12 @@ const storage = multer.diskStorage({
 
 const fileFilter = (req, file, cb) => {
   // Allow all standard audio formats
-  if (file.mimetype.startsWith('audio/') || file.mimetype === 'video/mp4' || file.mimetype === 'application/octet-stream') {
+  if (
+    file.mimetype.startsWith('audio/') ||
+    file.mimetype === 'video/mp4' ||
+    file.mimetype === 'application/octet-stream' ||
+    file.originalname.match(/\.(m4a|mp3|wav|webm|aac|ogg|3gp)$/i)
+  ) {
     cb(null, true);
   } else {
     cb(new Error('Only audio recordings are supported.'), false);

@@ -1,5 +1,10 @@
-const { CallLog, CALL_DISPOSITIONS, CALL_TYPES } = require('../models/callLog.model');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const { CallLog, CALL_DISPOSITIONS, CALL_TYPES, RECORDING_STATUSES } = require('../models/callLog.model');
 const { Lead, LEAD_STATUS } = require('../models/lead.model');
+
+const isSalesUser = (role) => role === 'Sales Executive' || role === 'Sales Member';
 
 // Create a new call log entry
 const createCallLog = async (req, res) => {
@@ -25,6 +30,14 @@ const createCallLog = async (req, res) => {
       updatedLeadStatus,
       recordingUrl,
       recordingDuration,
+      recordingType = 'none',
+      recordingStatus,
+      recordingOriginalFilename,
+      recordingFileSize,
+      recordingFileHash,
+      recordingUploadedAt,
+      callStartedAt,
+      callEndedAt,
     } = req.body;
 
     if (!leadId) {
@@ -50,8 +63,8 @@ const createCallLog = async (req, res) => {
       });
     }
 
-    // RBAC: Sales Executives can only log calls for their own leads or unassigned leads
-    if (user.role === 'Sales Executive') {
+    // RBAC: Sales Members/Executives can only log calls for their own leads or unassigned leads
+    if (isSalesUser(user.role)) {
       const isAssignedToUser = lead.assignedTo && lead.assignedTo.toString() === user._id.toString();
       const isUnassigned = !lead.assignedTo;
       if (!isAssignedToUser && !isUnassigned) {
@@ -76,6 +89,14 @@ const createCallLog = async (req, res) => {
       recordingUrl: recordingUrl || null,
       recordingDuration: recordingDuration ? Number(recordingDuration) : 0,
       hasRecording: !!recordingUrl,
+      recordingType: recordingUrl ? (recordingType || 'device_attachment') : 'none',
+      recordingStatus: recordingStatus || (recordingUrl ? RECORDING_STATUSES.UPLOADED : RECORDING_STATUSES.UNAVAILABLE),
+      recordingOriginalFilename: recordingOriginalFilename || null,
+      recordingFileSize: recordingFileSize ? Number(recordingFileSize) : 0,
+      recordingFileHash: recordingFileHash || null,
+      recordingUploadedAt: recordingUploadedAt ? new Date(recordingUploadedAt) : (recordingUrl ? new Date() : null),
+      callStartedAt: callStartedAt ? new Date(callStartedAt) : null,
+      callEndedAt: callEndedAt ? new Date(callEndedAt) : null,
     });
 
     await callLog.save();
@@ -142,8 +163,8 @@ const getCallLogsForLead = async (req, res) => {
       });
     }
 
-    // RBAC: Sales Executives can only view logs for leads they have access to
-    if (user.role === 'Sales Executive') {
+    // RBAC: Sales Members can only view logs for leads they have access to
+    if (isSalesUser(user.role)) {
       const isAssigned = lead.assignedTo && lead.assignedTo.toString() === user._id.toString();
       const isUnassigned = !lead.assignedTo;
       if (!isAssigned && !isUnassigned) {
@@ -179,8 +200,8 @@ const getCallStats = async (req, res) => {
     const user = req.user;
     const query = {};
 
-    // Sales Executive only sees their own stats
-    if (user.role === 'Sales Executive') {
+    // Sales user only sees their own stats
+    if (isSalesUser(user.role)) {
       query.userId = user._id;
     }
 
@@ -244,7 +265,7 @@ const getAllCallLogs = async (req, res) => {
     const { disposition, page = 1, limit = 20 } = req.query;
 
     const query = {};
-    if (user.role === 'Sales Executive') {
+    if (isSalesUser(user.role)) {
       query.userId = user._id;
     }
 
@@ -283,7 +304,7 @@ const getAllCallLogs = async (req, res) => {
   }
 };
 
-// Upload an audio recording file
+// Upload an audio recording file with deduplication and metadata tracking
 const uploadCallRecording = async (req, res) => {
   try {
     if (!req.file) {
@@ -293,8 +314,37 @@ const uploadCallRecording = async (req, res) => {
       });
     }
 
-    const recordingUrl = `/uploads/audio/${req.file.filename}`;
-    const { callLogId, duration } = req.body;
+    const { callLogId, leadId, duration, fileHash: clientHash, recordingType = 'device_attachment' } = req.body;
+
+    // Calculate MD5 hash of uploaded file if not provided by client
+    let fileHash = clientHash;
+    if (!fileHash && fs.existsSync(req.file.path)) {
+      const fileBuffer = fs.readFileSync(req.file.path);
+      fileHash = crypto.createHash('md5').update(fileBuffer).digest('hex');
+    }
+
+    let recordingUrl = `/uploads/audio/${req.file.filename}`;
+    let isDuplicate = false;
+
+    // Check if another call log already has this exact recording file hash on disk
+    if (fileHash) {
+      const existingRecord = await CallLog.findOne({
+        recordingFileHash: fileHash,
+        recordingUrl: { $ne: null },
+      });
+
+      if (existingRecord && existingRecord.recordingUrl) {
+        const existingDiskPath = path.join(__dirname, '../../uploads/audio', path.basename(existingRecord.recordingUrl));
+        if (fs.existsSync(existingDiskPath)) {
+          // File already exists on server disk; remove newly uploaded duplicate to save space
+          try {
+            fs.unlinkSync(req.file.path);
+          } catch (_) {}
+          recordingUrl = existingRecord.recordingUrl;
+          isDuplicate = true;
+        }
+      }
+    }
 
     let updatedLog = null;
     if (callLogId) {
@@ -303,7 +353,13 @@ const uploadCallRecording = async (req, res) => {
         {
           recordingUrl,
           hasRecording: true,
+          recordingStatus: RECORDING_STATUSES.UPLOADED,
           recordingDuration: duration ? Number(duration) : 0,
+          recordingType,
+          recordingFileSize: req.file.size || 0,
+          recordingOriginalFilename: req.file.originalname,
+          recordingFileHash: fileHash || null,
+          recordingUploadedAt: new Date(),
         },
         { new: true }
       );
@@ -311,9 +367,13 @@ const uploadCallRecording = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message: 'Audio recording uploaded successfully.',
+      message: isDuplicate ? 'Recording deduplicated & linked successfully.' : 'Audio recording uploaded successfully.',
       recordingUrl,
-      filename: req.file.filename,
+      filename: path.basename(recordingUrl),
+      originalFilename: req.file.originalname,
+      fileHash,
+      fileSize: req.file.size,
+      recordingStatus: RECORDING_STATUSES.UPLOADED,
       callLog: updatedLog,
     });
   } catch (error) {
@@ -325,11 +385,157 @@ const uploadCallRecording = async (req, res) => {
   }
 };
 
+// Stream or download a call recording with RBAC and HTTP Range request support
+const streamCallRecording = async (req, res) => {
+  try {
+    const { callLogId } = req.params;
+    const user = req.user;
+
+    const callLog = await CallLog.findById(callLogId).populate('leadId');
+    if (!callLog) {
+      return res.status(404).json({
+        success: false,
+        message: 'Call log record not found.',
+      });
+    }
+
+    if (!callLog.hasRecording || !callLog.recordingUrl) {
+      return res.status(404).json({
+        success: false,
+        message: 'No recording file is associated with this call.',
+      });
+    }
+
+    // RBAC Authorization
+    if (user.role === 'Data Analyst') {
+      return res.status(403).json({
+        success: false,
+        message: 'Data Analysts have metadata-only access and cannot stream call recordings.',
+      });
+    }
+
+    if (isSalesUser(user.role)) {
+      const isCaller = callLog.userId.toString() === user._id.toString();
+      const isLeadAssignee = callLog.leadId?.assignedTo && callLog.leadId.assignedTo.toString() === user._id.toString();
+      if (!isCaller && !isLeadAssignee) {
+        return res.status(403).json({
+          success: false,
+          message: 'You are only authorized to listen to recordings for your own leads or calls.',
+        });
+      }
+    }
+
+    // Resolve file path on disk
+    const audioFilename = path.basename(callLog.recordingUrl);
+    const audioFilePath = path.join(__dirname, '../../uploads/audio', audioFilename);
+
+    if (!fs.existsSync(audioFilePath)) {
+      return res.status(404).json({
+        success: false,
+        message: 'Recording audio file is missing from server storage.',
+      });
+    }
+
+    const stat = fs.statSync(audioFilePath);
+    const fileSize = stat.size;
+    const range = req.headers.range;
+
+    // Detect MIME type based on file extension
+    const ext = path.extname(audioFilename).toLowerCase();
+    let contentType = 'audio/mp4';
+    if (ext === '.mp3') contentType = 'audio/mpeg';
+    else if (ext === '.wav') contentType = 'audio/wav';
+    else if (ext === '.ogg') contentType = 'audio/ogg';
+    else if (ext === '.webm') contentType = 'audio/webm';
+    else if (ext === '.amr') contentType = 'audio/amr';
+
+    // Download attachment support
+    if (req.query.download === 'true') {
+      const dlName = callLog.recordingOriginalFilename || audioFilename;
+      res.setHeader('Content-Disposition', `attachment; filename="${dlName}"`);
+    }
+
+    // HTTP 206 Partial Content for streaming & seeking
+    if (range) {
+      const parts = range.replace(/bytes=/, '').split('-');
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+
+      if (start >= fileSize) {
+        res.status(416).send(`Requested range not satisfiable\n${start} >= ${fileSize}`);
+        return;
+      }
+
+      const chunksize = end - start + 1;
+      const fileStream = fs.createReadStream(audioFilePath, { start, end });
+      const head = {
+        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': chunksize,
+        'Content-Type': contentType,
+      };
+
+      res.writeHead(206, head);
+      fileStream.pipe(res);
+    } else {
+      const head = {
+        'Content-Length': fileSize,
+        'Content-Type': contentType,
+        'Accept-Ranges': 'bytes',
+      };
+      res.writeHead(200, head);
+      fs.createReadStream(audioFilePath).pipe(res);
+    }
+  } catch (error) {
+    console.error('Error streaming call recording:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to stream audio recording.',
+    });
+  }
+};
+
+// Update recording status for a call log (e.g. from offline queue transitions)
+const updateRecordingStatus = async (req, res) => {
+  try {
+    const { callLogId } = req.params;
+    const { recordingStatus, reason } = req.body;
+
+    if (!Object.values(RECORDING_STATUSES).includes(recordingStatus)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid recordingStatus. Must be one of: [${Object.values(RECORDING_STATUSES).join(', ')}]`,
+      });
+    }
+
+    const updatedLog = await CallLog.findByIdAndUpdate(
+      callLogId,
+      {
+        recordingStatus,
+        notes: reason ? `${reason}` : undefined,
+      },
+      { new: true }
+    );
+
+    return res.status(200).json({
+      success: true,
+      callLog: updatedLog,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to update recording status.',
+    });
+  }
+};
+
 module.exports = {
   createCallLog,
   getCallLogsForLead,
   getCallStats,
   getAllCallLogs,
   uploadCallRecording,
+  streamCallRecording,
+  updateRecordingStatus,
 };
 

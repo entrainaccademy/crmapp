@@ -7,6 +7,7 @@ const {
   getRoles,
   adminTest,
   managerTest,
+  changePassword,
 } = require('../controllers/auth.controller');
 const { authenticateToken, authorizeRoles } = require('../middleware/auth.middleware');
 const { ROLES } = require('../models/user.model');
@@ -18,6 +19,7 @@ router.get('/roles', getRoles);
 
 // Protected routes
 router.get('/me', authenticateToken, getMe);
+router.post('/change-password', authenticateToken, changePassword);
 
 // Role-protected test routes
 router.get(

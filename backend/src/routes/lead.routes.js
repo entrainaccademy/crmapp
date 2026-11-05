@@ -5,6 +5,8 @@ const {
   getLeadById,
   createLead,
   updateLead,
+  assignLead,
+  bulkAssignLeads,
   deleteLead,
   getAssignableUsers,
   getLeadStats,
@@ -18,10 +20,14 @@ router.use(authenticateToken);
 router.get('/stats', getLeadStats);
 router.get('/assignable-users', getAssignableUsers);
 
-// CRUD operations
+// Bulk assignment (declared before /:id)
+router.post('/bulk-assign', bulkAssignLeads);
+
+// CRUD and individual assignment
 router.get('/', getLeads);
 router.get('/:id', getLeadById);
 router.post('/', createLead);
+router.post('/:id/assign', assignLead);
 router.put('/:id', updateLead);
 router.delete('/:id', deleteLead);
 

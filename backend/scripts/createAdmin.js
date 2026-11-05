@@ -6,7 +6,7 @@ const { User, ROLES } = require('../src/models/user.model');
 const createAdmin = async () => {
   const args = process.argv.slice(2);
   const email = (args[0] || process.env.ADMIN_EMAIL || 'admin@crmapp.com').toLowerCase().trim();
-  const password = args[1] || process.env.ADMIN_PASSWORD || 'Admin@123456';
+  const password = args[1] || process.env.ADMIN_PASSWORD || 'crm@123';
   const name = args[2] || process.env.ADMIN_NAME || 'System Administrator';
 
   console.log('--- CRM Admin Account Initialization ---');
@@ -16,22 +16,22 @@ const createAdmin = async () => {
   try {
     await connectDB();
 
-    const existingUser = await User.findOne({ email });
+    const existingUser = await User.findOne({ email }).select('+password');
 
     if (existingUser) {
-      if (existingUser.role === ROLES.ADMIN) {
-        console.log(`Notice: Admin user '${email}' already exists. No action needed.`);
-      } else {
-        existingUser.role = ROLES.ADMIN;
-        await existingUser.save();
-        console.log(`Success: Existing user '${email}' promoted to Admin role.`);
-      }
+      existingUser.name = name;
+      existingUser.role = ROLES.ADMIN;
+      existingUser.password = password;
+      existingUser.isActive = true;
+      await existingUser.save();
+      console.log(`Success: Admin user '${email}' updated with new password.`);
     } else {
       const newAdmin = await User.create({
         name,
         email,
         password,
         role: ROLES.ADMIN,
+        isActive: true,
       });
       console.log(`Success: Admin user created successfully with ID: ${newAdmin._id}`);
     }

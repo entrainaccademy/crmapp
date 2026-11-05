@@ -165,6 +165,58 @@ const managerTest = async (req, res) => {
   });
 };
 
+// @route   POST /api/auth/change-password
+// @desc    Change password (required for first login or security)
+// @access  Private (Authenticated)
+const changePassword = async (req, res, next) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'Current password and new password are required.',
+      });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password must be at least 6 characters long.',
+      });
+    }
+
+    // Retrieve user with password
+    const user = await User.findById(req.user._id).select('+password');
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User account not found.',
+      });
+    }
+
+    const isMatch = await user.comparePassword(currentPassword);
+    if (!isMatch) {
+      return res.status(401).json({
+        success: false,
+        message: 'Current password is incorrect.',
+      });
+    }
+
+    user.password = newPassword;
+    user.mustChangePassword = false;
+    await user.save();
+
+    return res.status(200).json({
+      success: true,
+      message: 'Password changed successfully.',
+      user: user.toJSON(),
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   register,
   login,
@@ -172,5 +224,6 @@ module.exports = {
   getRoles,
   adminTest,
   managerTest,
+  changePassword,
 };
 

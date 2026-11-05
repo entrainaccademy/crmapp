@@ -5,6 +5,7 @@ const ROLES = Object.freeze({
   ADMIN: 'Admin',
   MANAGER: 'Manager',
   SALES_EXECUTIVE: 'Sales Executive',
+  SALES_MEMBER: 'Sales Member',
   DATA_ANALYST: 'Data Analyst',
 });
 
@@ -37,9 +38,9 @@ const userSchema = new mongoose.Schema(
       type: String,
       enum: {
         values: Object.values(ROLES),
-        message: '{VALUE} is not a valid role. Allowed roles: Admin, Manager, Sales Executive, Data Analyst',
+        message: '{VALUE} is not a valid role. Allowed roles: Admin, Manager, Sales Executive, Sales Member, Data Analyst',
       },
-      default: ROLES.SALES_EXECUTIVE,
+      default: ROLES.SALES_MEMBER,
     },
     phone: {
       type: String,
@@ -49,6 +50,10 @@ const userSchema = new mongoose.Schema(
     isActive: {
       type: Boolean,
       default: true,
+    },
+    mustChangePassword: {
+      type: Boolean,
+      default: false,
     },
   },
   {

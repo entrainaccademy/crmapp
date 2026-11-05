@@ -94,6 +94,50 @@ const leadSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    assignedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+      index: true,
+    },
+    assignedAt: {
+      type: Date,
+      default: null,
+    },
+    assignmentStatus: {
+      type: String,
+      enum: ['Unassigned', 'Assigned', 'Reassigned'],
+      default: 'Unassigned',
+      index: true,
+    },
+    assignmentHistory: [
+      {
+        assignedTo: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: 'User',
+          required: true,
+        },
+        assignedBy: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: 'User',
+          required: true,
+        },
+        assignedAt: {
+          type: Date,
+          default: Date.now,
+        },
+        previousAssignee: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: 'User',
+          default: null,
+        },
+        notes: {
+          type: String,
+          trim: true,
+          default: '',
+        },
+      },
+    ],
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
@@ -108,6 +152,7 @@ const leadSchema = new mongoose.Schema(
 
 // Helpful compound indexes for query efficiency
 leadSchema.index({ assignedTo: 1, status: 1 });
+leadSchema.index({ assignedTo: 1, assignmentStatus: 1 });
 leadSchema.index({ createdAt: -1 });
 
 const Lead = mongoose.model('Lead', leadSchema);
