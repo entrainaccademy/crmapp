@@ -9,12 +9,23 @@ const isSalesRole = (role) => {
 };
 
 // @route   GET /api/sales-members
-// @desc    List all Sales Members with performance stats
+// @desc    List all Sales Members with performance stats (Admin can see all team members)
 // @access  Private (Data Analyst, Admin, Manager)
 const getSalesMembers = async (req, res, next) => {
   try {
+    const roleQuery = req.query.role;
+    let roleFilter;
+
+    if (roleQuery && Object.values(ROLES).includes(roleQuery)) {
+      roleFilter = roleQuery;
+    } else if (req.user && req.user.role === ROLES.ADMIN) {
+      roleFilter = { $in: Object.values(ROLES) };
+    } else {
+      roleFilter = { $in: [ROLES.SALES_MEMBER, ROLES.SALES_EXECUTIVE] };
+    }
+
     const members = await User.find({
-      role: { $in: [ROLES.SALES_MEMBER, ROLES.SALES_EXECUTIVE] },
+      role: roleFilter,
     })
       .sort({ createdAt: -1 })
       .lean();
@@ -59,11 +70,11 @@ const getSalesMembers = async (req, res, next) => {
 };
 
 // @route   POST /api/sales-members
-// @desc    Create a new Sales Member account
+// @desc    Create a new User / Sales Member account with role selection
 // @access  Private (Data Analyst, Admin, Manager)
 const createSalesMember = async (req, res, next) => {
   try {
-    const { name, email, phone, password, confirmPassword } = req.body;
+    const { name, email, phone, password, confirmPassword, role } = req.body;
 
     if (!name || !email || !password) {
       return res.status(400).json({
@@ -97,21 +108,52 @@ const createSalesMember = async (req, res, next) => {
       });
     }
 
-    // Role is automatically assigned as 'Sales Member'
-    // Data Analysts cannot create Super Admin or Manager accounts
+    // Role determination with role-based security
+    let assignedRole = ROLES.SALES_EXECUTIVE; // Default to Sales Executive for easy lead assignment
+    const requestedRole = role ? role.trim() : null;
+
+    if (requestedRole) {
+      if (!Object.values(ROLES).includes(requestedRole)) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid role '${requestedRole}'. Allowed: ${Object.values(ROLES).join(', ')}.`,
+        });
+      }
+
+      if (req.user.role === ROLES.DATA_ANALYST) {
+        if (![ROLES.SALES_EXECUTIVE, ROLES.SALES_MEMBER].includes(requestedRole)) {
+          return res.status(403).json({
+            success: false,
+            message: 'Data Analysts can only create Sales Executive or Sales Member accounts.',
+          });
+        }
+        assignedRole = requestedRole;
+      } else if (req.user.role === ROLES.ADMIN) {
+        assignedRole = requestedRole;
+      } else if (req.user.role === ROLES.MANAGER) {
+        if (requestedRole === ROLES.ADMIN) {
+          return res.status(403).json({
+            success: false,
+            message: 'Managers cannot create Admin accounts.',
+          });
+        }
+        assignedRole = requestedRole;
+      }
+    }
+
     const newMember = await User.create({
       name: name.trim(),
       email: normalizedEmail,
       phone: phone ? phone.trim() : '',
       password,
-      role: ROLES.SALES_MEMBER,
+      role: assignedRole,
       isActive: true,
       mustChangePassword: false,
     });
 
     return res.status(201).json({
       success: true,
-      message: 'Sales Member created successfully.',
+      message: `${assignedRole} created successfully.`,
       salesMember: newMember.toJSON(),
     });
   } catch (error) {
@@ -120,12 +162,12 @@ const createSalesMember = async (req, res, next) => {
 };
 
 // @route   PUT /api/sales-members/:id
-// @desc    Update Sales Member details
+// @desc    Update User / Sales Member details
 // @access  Private (Data Analyst, Admin, Manager)
 const updateSalesMember = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { name, phone, email, password } = req.body;
+    const { name, phone, email, password, role } = req.body;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({
@@ -138,20 +180,32 @@ const updateSalesMember = async (req, res, next) => {
     if (!member) {
       return res.status(404).json({
         success: false,
-        message: 'Sales Member not found.',
+        message: 'User account not found.',
       });
     }
 
     // Security check: Data Analysts cannot modify Admin or Manager accounts
-    if (!isSalesRole(member.role)) {
+    if (req.user.role === ROLES.DATA_ANALYST && !isSalesRole(member.role)) {
       return res.status(403).json({
         success: false,
-        message: 'Forbidden: You can only manage Sales Member accounts.',
+        message: 'Forbidden: You can only manage Sales Member or Sales Executive accounts.',
       });
     }
 
     if (name) member.name = name.trim();
     if (phone !== undefined) member.phone = phone.trim();
+
+    if (role && Object.values(ROLES).includes(role)) {
+      if (req.user.role === ROLES.DATA_ANALYST) {
+        if ([ROLES.SALES_EXECUTIVE, ROLES.SALES_MEMBER].includes(role)) {
+          member.role = role;
+        }
+      } else if (req.user.role === ROLES.ADMIN) {
+        member.role = role;
+      } else if (req.user.role === ROLES.MANAGER && role !== ROLES.ADMIN) {
+        member.role = role;
+      }
+    }
 
     if (email) {
       const normalizedEmail = email.toLowerCase().trim();
@@ -211,11 +265,18 @@ const toggleSalesMemberStatus = async (req, res, next) => {
       });
     }
 
-    // Security check: cannot deactivate Admins or Managers
-    if (!isSalesRole(member.role)) {
+    // Security check: cannot deactivate Admins or Managers (Admin can toggle anyone except self)
+    if (req.user.role === ROLES.ADMIN) {
+      if (member._id.toString() === req.user._id.toString()) {
+        return res.status(400).json({
+          success: false,
+          message: 'You cannot deactivate your own admin account.',
+        });
+      }
+    } else if (!isSalesRole(member.role)) {
       return res.status(403).json({
         success: false,
-        message: 'Forbidden: You can only activate or deactivate Sales Member accounts.',
+        message: 'Forbidden: You can only activate or deactivate Sales Member or Sales Executive accounts.',
       });
     }
 

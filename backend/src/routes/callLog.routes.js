@@ -8,12 +8,20 @@ const {
   uploadCallRecording,
   streamCallRecording,
   updateRecordingStatus,
+  syncCallRecording,
+  getUnmatchedRecordings,
 } = require('../controllers/callLog.controller');
 const { authenticateToken } = require('../middleware/auth.middleware');
 const { audioUpload } = require('../middleware/upload.middleware');
 
 // All call routes require authentication
 router.use(authenticateToken);
+
+// Unmatched background recordings
+router.get('/unmatched', getUnmatchedRecordings);
+
+// Background auto-sync recording upload with deduplication & lead matching
+router.post('/sync-recording', audioUpload.single('audio'), syncCallRecording);
 
 // Call Stats & List
 router.get('/stats', getCallStats);

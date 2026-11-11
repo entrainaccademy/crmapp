@@ -13,7 +13,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+
+// Private Audio Storage: Call recordings are NEVER exposed via unauthenticated static file serving.
+// All recordings are securely stored and streamed via authenticated /api/calls/:callLogId/recording route.
 
 // Database connection check for API requests (health check is always accessible)
 app.use('/api', (req, res, next) => {

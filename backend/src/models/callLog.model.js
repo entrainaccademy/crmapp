@@ -28,7 +28,23 @@ const callLogSchema = new mongoose.Schema(
     leadId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Lead',
-      required: [true, 'Associated Lead ID is required'],
+      required: false,
+      default: null,
+      index: true,
+    },
+    isMatched: {
+      type: Boolean,
+      default: true,
+      index: true,
+    },
+    matchedBy: {
+      type: String,
+      enum: ['phone_match', 'manual', 'unmatched'],
+      default: 'manual',
+    },
+    syncedByBackground: {
+      type: Boolean,
+      default: false,
       index: true,
     },
     userId: {

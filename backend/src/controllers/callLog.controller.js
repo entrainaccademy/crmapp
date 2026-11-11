@@ -4,6 +4,24 @@ const crypto = require('crypto');
 const { CallLog, CALL_DISPOSITIONS, CALL_TYPES, RECORDING_STATUSES } = require('../models/callLog.model');
 const { Lead, LEAD_STATUS } = require('../models/lead.model');
 
+const PRIVATE_RECORDINGS_DIR = path.join(__dirname, '../../storage/recordings');
+const LEGACY_UPLOADS_DIR = path.join(__dirname, '../../uploads/audio');
+
+if (!fs.existsSync(PRIVATE_RECORDINGS_DIR)) {
+  fs.mkdirSync(PRIVATE_RECORDINGS_DIR, { recursive: true });
+}
+
+// Safely resolves the disk path for a recording URL (checks private storage first, then legacy uploads)
+function resolveRecordingDiskPath(recordingUrl) {
+  if (!recordingUrl) return null;
+  const filename = path.basename(recordingUrl);
+  const primaryPath = path.join(PRIVATE_RECORDINGS_DIR, filename);
+  if (fs.existsSync(primaryPath)) return primaryPath;
+  const legacyPath = path.join(LEGACY_UPLOADS_DIR, filename);
+  if (fs.existsSync(legacyPath)) return legacyPath;
+  return primaryPath;
+}
+
 const isSalesUser = (role) => role === 'Sales Executive' || role === 'Sales Member';
 
 // Create a new call log entry
@@ -425,11 +443,11 @@ const streamCallRecording = async (req, res) => {
       }
     }
 
-    // Resolve file path on disk
+    // Resolve file path on disk from secure private storage
     const audioFilename = path.basename(callLog.recordingUrl);
-    const audioFilePath = path.join(__dirname, '../../uploads/audio', audioFilename);
+    const audioFilePath = resolveRecordingDiskPath(callLog.recordingUrl);
 
-    if (!fs.existsSync(audioFilePath)) {
+    if (!audioFilePath || !fs.existsSync(audioFilePath)) {
       return res.status(404).json({
         success: false,
         message: 'Recording audio file is missing from server storage.',
@@ -529,6 +547,224 @@ const updateRecordingStatus = async (req, res) => {
   }
 };
 
+// Sync an auto-detected background call recording with lead matching & deduplication
+const syncCallRecording = async (req, res) => {
+  try {
+    const user = req.user;
+
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No audio recording file provided in request.',
+      });
+    }
+
+    const {
+      duration = 0,
+      fileHash: clientHash,
+      callTimestamp,
+      phoneNumber: rawPhone,
+      contactName,
+      recordingType = 'device_attachment',
+    } = req.body;
+
+    // 1. Calculate MD5 hash of uploaded file if not provided
+    let fileHash = clientHash;
+    if (!fileHash && fs.existsSync(req.file.path)) {
+      const fileBuffer = fs.readFileSync(req.file.path);
+      fileHash = crypto.createHash('md5').update(fileBuffer).digest('hex');
+    }
+
+    let recordingUrl = `/storage/recordings/${req.file.filename}`;
+
+    // 2. Deduplication check against existing records on disk
+    if (fileHash) {
+      const existingRecord = await CallLog.findOne({
+        recordingFileHash: fileHash,
+        recordingUrl: { $ne: null },
+      });
+
+      if (existingRecord && existingRecord.recordingUrl) {
+        const existingPath = resolveRecordingDiskPath(existingRecord.recordingUrl);
+        if (existingPath && fs.existsSync(existingPath)) {
+          // File already exists on server disk; remove newly uploaded duplicate
+          try {
+            fs.unlinkSync(req.file.path);
+          } catch (_) {}
+
+          return res.status(200).json({
+            success: true,
+            isDuplicate: true,
+            message: 'Recording already synced & deduplicated on server.',
+            callLog: existingRecord,
+            fileHash,
+          });
+        }
+      }
+    }
+
+    // 3. Extract metadata and clean phone digits for matching
+    let extractedPhone = rawPhone || null;
+    let extractedName = contactName || null;
+
+    if (!extractedPhone && req.file.originalname) {
+      const phoneMatch = req.file.originalname.match(/(\+?\d{10,13})/);
+      if (phoneMatch) {
+        extractedPhone = phoneMatch[1];
+      }
+    }
+
+    let cleanDigits = extractedPhone ? extractedPhone.replace(/\D/g, '') : '';
+    if (cleanDigits.length > 10) {
+      cleanDigits = cleanDigits.slice(-10); // Standardize to last 10 digits
+    }
+
+    // 4. Lead Matching Algorithm (only when reliable metadata exists)
+    let matchedLead = null;
+    let matchedBy = 'unmatched';
+    let isMatched = false;
+
+    if (cleanDigits && cleanDigits.length >= 10) {
+      matchedLead = await Lead.findOne({
+        phone: { $regex: cleanDigits },
+      });
+      if (matchedLead) {
+        matchedBy = 'phone_match';
+        isMatched = true;
+      }
+    }
+
+    // If phone didn't match, attempt contact name match
+    if (!matchedLead && extractedName && extractedName.trim().length > 2) {
+      matchedLead = await Lead.findOne({
+        name: { $regex: new RegExp(`^${extractedName.trim()}$`, 'i') },
+      });
+      if (matchedLead) {
+        matchedBy = 'name_match';
+        isMatched = true;
+      }
+    }
+
+    const recordedAt = callTimestamp ? new Date(callTimestamp) : new Date();
+
+    // 5. If matched to a lead, look for an existing CallLog around that time (±30 mins)
+    let targetCallLog = null;
+    if (matchedLead) {
+      const windowStart = new Date(recordedAt.getTime() - 30 * 60 * 1000);
+      const windowEnd = new Date(recordedAt.getTime() + 30 * 60 * 1000);
+
+      targetCallLog = await CallLog.findOne({
+        userId: user._id,
+        leadId: matchedLead._id,
+        createdAt: { $gte: windowStart, $lte: windowEnd },
+      });
+    }
+
+    if (targetCallLog) {
+      // Update existing call log with recording
+      targetCallLog.recordingUrl = recordingUrl;
+      targetCallLog.hasRecording = true;
+      targetCallLog.recordingStatus = RECORDING_STATUSES.UPLOADED;
+      targetCallLog.recordingDuration = duration ? Number(duration) : targetCallLog.recordingDuration;
+      targetCallLog.recordingType = recordingType;
+      targetCallLog.recordingFileSize = req.file.size || 0;
+      targetCallLog.recordingOriginalFilename = req.file.originalname;
+      targetCallLog.recordingFileHash = fileHash;
+      targetCallLog.recordingUploadedAt = new Date();
+      targetCallLog.syncedByBackground = true;
+      targetCallLog.isMatched = true;
+      targetCallLog.matchedBy = matchedBy;
+
+      await targetCallLog.save();
+    } else {
+      // Create a new CallLog (either matched to lead or marked as unmatched)
+      targetCallLog = new CallLog({
+        leadId: matchedLead ? matchedLead._id : null,
+        userId: user._id,
+        phoneNumber: extractedPhone || (matchedLead ? matchedLead.phone : 'Unknown'),
+        callType: CALL_TYPES.OUTBOUND,
+        disposition: CALL_DISPOSITIONS.CONNECTED,
+        duration: Math.max(0, Number(duration) || 0),
+        notes: isMatched
+          ? `Auto-synced background recording matched to lead: ${matchedLead.name}`
+          : `Auto-synced background recording (Unmatched lead). File: ${req.file.originalname}`,
+        recordingUrl,
+        recordingDuration: duration ? Number(duration) : 0,
+        hasRecording: true,
+        recordingType,
+        recordingStatus: RECORDING_STATUSES.UPLOADED,
+        recordingOriginalFilename: req.file.originalname,
+        recordingFileSize: req.file.size || 0,
+        recordingFileHash: fileHash,
+        recordingUploadedAt: new Date(),
+        callStartedAt: recordedAt,
+        callEndedAt: new Date(recordedAt.getTime() + (Number(duration) || 0) * 1000),
+        syncedByBackground: true,
+        isMatched,
+        matchedBy,
+      });
+
+      await targetCallLog.save();
+
+      // If matched and lead status was 'New', auto-advance to 'Contacted'
+      if (matchedLead && matchedLead.status === LEAD_STATUS.NEW) {
+        matchedLead.status = LEAD_STATUS.CONTACTED;
+        await matchedLead.save();
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: isMatched
+        ? `Recording synced and matched to lead ${matchedLead.name}.`
+        : 'Recording synced securely and marked as unmatched.',
+      isMatched,
+      matchedLead: matchedLead
+        ? { _id: matchedLead._id, name: matchedLead.name, phone: matchedLead.phone }
+        : null,
+      callLog: targetCallLog,
+      fileHash,
+      recordingUrl,
+    });
+  } catch (error) {
+    console.error('Error syncing call recording:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to sync call recording.',
+    });
+  }
+};
+
+// Retrieve unmatched recordings for review or manual linking
+const getUnmatchedRecordings = async (req, res) => {
+  try {
+    const user = req.user;
+    const query = { isMatched: false, hasRecording: true };
+
+    if (isSalesUser(user.role)) {
+      query.userId = user._id;
+    }
+
+    const unmatched = await CallLog.find(query)
+      .populate('userId', 'name email role')
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean();
+
+    return res.status(200).json({
+      success: true,
+      count: unmatched.length,
+      recordings: unmatched,
+    });
+  } catch (error) {
+    console.error('Error fetching unmatched recordings:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to fetch unmatched recordings.',
+    });
+  }
+};
+
 module.exports = {
   createCallLog,
   getCallLogsForLead,
@@ -537,5 +773,7 @@ module.exports = {
   uploadCallRecording,
   streamCallRecording,
   updateRecordingStatus,
+  syncCallRecording,
+  getUnmatchedRecordings,
 };
 
